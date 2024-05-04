@@ -2,20 +2,20 @@ import os
 from glob import glob
 from typing import Callable
 
-import pytorch_lightning as pl
+import lightning as pl
 import torch
 import torch.utils.data as data
 from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision.transforms import (Compose, Lambda, RandomCrop,
-                                    RandomHorizontalFlip, Resize, ToTensor)
+                                    RandomHorizontalFlip, Resize, ToTensor, Normalize)
 
 
 class SimpleDataModule(pl.LightningDataModule):
     def __init__(
         self,
         root: str,
-        size: int = 256,
+        size: int = 512,
         crop: int = 224,
         num_val: int = 1000,
         batch_size: int = 32,
@@ -36,6 +36,7 @@ class SimpleDataModule(pl.LightningDataModule):
         self.num_val = num_val
         self.batch_size = batch_size
         self.workers = workers
+        
 
         self.transforms = Compose(
             [
@@ -43,7 +44,8 @@ class SimpleDataModule(pl.LightningDataModule):
                 RandomCrop(crop),
                 RandomHorizontalFlip(),
                 ToTensor(),
-                Lambda(lambda t: (t * 2) - 1),  # Scale to [-1, 1]
+                Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                # Lambda(lambda t: (t * 2) - 1),  # Scale to [-1, 1]
             ]
         )
 

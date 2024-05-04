@@ -1,28 +1,30 @@
-from argparse import Namespace
 
-import pytorch_lightning as pl
+if __name__ == '__main__':
+    from argparse import Namespace
 
-from src.data import SimpleDataModule
-from src.model import DecoderDenoisingModel
-from src.pl_utils import MyLightningArgumentParser, init_logger
+    import pytorch_lightning as pl
 
-model_class = DecoderDenoisingModel
-dm_class = SimpleDataModule
+    from src.data import SimpleDataModule
+    from src.model import DecoderDenoisingModel
+    from src.pl_utils import MyLightningArgumentParser, init_logger
 
-# Parse arguments
-parser = MyLightningArgumentParser()
-parser.add_lightning_class_args(pl.Trainer, None)  # type:ignore
-parser.add_lightning_class_args(dm_class, "data")
-parser.add_lightning_class_args(model_class, "model")
+    model_class = DecoderDenoisingModel
+    dm_class = SimpleDataModule
 
-args = parser.parse_args()
+    # Parse arguments
+    parser = MyLightningArgumentParser()
+    parser.add_lightning_class_args(pl.Trainer, None)  # type:ignore
+    parser.add_lightning_class_args(dm_class, "data")
+    parser.add_lightning_class_args(model_class, "model")
 
-# Setup trainer
-logger = init_logger(args)
-dm = dm_class(**args["data"])
-model = model_class(**args["model"])
-trainer = pl.Trainer.from_argparse_args(Namespace(**args), logger=logger)
+    args = parser.parse_args()
 
-# Train
-trainer.tune(model, dm)
-trainer.fit(model, dm)
+    # Setup trainer
+    logger = init_logger(args)
+    dm = dm_class(**args["data"])
+    model = model_class(**args["model"])
+    trainer = pl.Trainer.from_argparse_args(Namespace(**args), logger=logger)
+
+    # Train
+    trainer.tune(model, dm)
+    trainer.fit(model, dm)

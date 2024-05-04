@@ -1,8 +1,9 @@
 from typing import Any
 
-from pytorch_lightning.loggers import (CSVLogger, LightningLoggerBase,
+from pytorch_lightning.loggers import (CSVLogger, Logger,
                                        TensorBoardLogger, WandbLogger)
-from pytorch_lightning.utilities.cli import LightningArgumentParser
+from pytorch_lightning.cli import LightningArgumentParser
+
 
 
 class MyLightningArgumentParser(LightningArgumentParser):
@@ -33,7 +34,7 @@ class MyLightningArgumentParser(LightningArgumentParser):
         )
 
 
-def init_logger(args: dict) -> LightningLoggerBase:  # type:ignore
+def init_logger(args: dict) -> Logger:  # type:ignore
     """Initialize logger from arguments
 
     Args:

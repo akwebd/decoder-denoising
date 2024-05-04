@@ -1,10 +1,31 @@
-import pytorch_lightning as pl
+import lightning as pl
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn.functional as F
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torchmetrics import Metric
 
+class JaccardIndex(Metric):
+    def __init__(self, num_classes=3, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.add_state("intersection", default=torch.zeros(num_classes), dist_reduce_fx="sum")
+        self.add_state("union", default=torch.zeros(num_classes), dist_reduce_fx="sum")
+
+    def update(self, preds, target):
+        preds = F.softmax(preds, dim=1).argmax(dim=1)
+        for i in range(preds.shape[1]):
+            pred_class = preds[:, i]
+            target_class = target[:, i]
+            intersection = torch.logical_and(pred_class, target_class).sum(dim=(1, 2))
+            union = torch.logical_or(pred_class, target_class).sum(dim=(1, 2))
+            self.intersection[i] += intersection.float().sum()
+            self.union[i] += union.float().sum()
+
+    def compute(self):
+        eps = 1e-10  # small epsilon to prevent division by zero
+        iou = self.intersection / (self.union + eps)
+        return iou.mean().item()  # Average IoU across classes
 
 class DecoderDenoisingModel(pl.LightningModule):
     def __init__(
@@ -122,7 +143,7 @@ class DecoderDenoisingModel(pl.LightningModule):
         loss = self.loss_fn(pred_noise, noise)
 
         # Log
-        self.log(f"{mode}_loss", loss)
+        self.log(f"{mode}_loss", loss, prog_bar=True)
 
         return loss
 
@@ -175,3 +196,62 @@ class DecoderDenoisingModel(pl.LightningModule):
                 "interval": "step",
             },
         }
+
+class FineTuningModel(DecoderDenoisingModel):
+    def __init__(self, *args, **kwargs):
+        """Fine Tuning Model
+
+        Args:
+            lr: Learning rate
+            optimizer: Name of optimizer (adam | adamw | sgd)
+            betas: Adam beta parameters
+            weight_decay: Optimizer weight decay
+            momentum: SGD momentum parameter
+            arch: Segmentation model architecture
+            encoder: Segmentation model encoder architecture
+            in_channels: Number of channels of input image
+            mode: Denoising pretraining mode (encoder | encoder+decoder)
+            noise_type: Type of noising process (scaled | simple)
+            noise_std: Standard deviation/magnitude of gaussian noise
+            loss_type: Loss function type (l1 | l2 | huber)
+            channel_last: Change to channel last memory format for possible training speed up
+        """
+        super().__init__(*args, **kwargs)
+        
+        self.acc_fn = {'train': JaccardIndex(), 'val': JaccardIndex()}
+
+    def step(self, x, y=None, mode="train"):
+
+        # Predict mask
+        pred_y = self.net(x)
+
+        # Calculate loss
+        loss = self.loss_fn(pred_y, y)
+        
+        if y is not None:
+            # update accuracy
+            self.acc_fn[mode](pred_y, y)
+
+        # Log
+        self.log(f"{mode}_loss", loss, prog_bar=True)
+
+        return loss
+
+    def training_step(self, x, y):
+        self.log(
+            "lr",
+            self.trainer.optimizers[0].param_groups[0]["lr"],  # type:ignore
+            prog_bar=True,
+        )
+        return self.step(x, y, mode="train")
+
+    def validation_step(self, x, y):
+        return self.step(x, y, mode="val")
+    
+    def trainin_epoch_end(self):
+        self.log('train_jaccard', self.acc_fn['train'].compute())
+        
+    def validation_epoch_end(self):
+        self.log('val_jaccard', self.acc_fn['val'].compute())
+
+
