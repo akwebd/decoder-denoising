@@ -3,29 +3,10 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.nn.functional as F
 from torch.optim import SGD, Adam, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torchmetrics import Metric
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torchmetrics import Metric, JaccardIndex
+import numpy as np
 
-class JaccardIndex(Metric):
-    def __init__(self, num_classes=3, dist_sync_on_step=False):
-        super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.add_state("intersection", default=torch.zeros(num_classes), dist_reduce_fx="sum")
-        self.add_state("union", default=torch.zeros(num_classes), dist_reduce_fx="sum")
-
-    def update(self, preds, target):
-        preds = F.softmax(preds, dim=1).argmax(dim=1)
-        for i in range(preds.shape[1]):
-            pred_class = preds[:, i]
-            target_class = target[:, i]
-            intersection = torch.logical_and(pred_class, target_class).sum(dim=(1, 2))
-            union = torch.logical_or(pred_class, target_class).sum(dim=(1, 2))
-            self.intersection[i] += intersection.float().sum()
-            self.union[i] += union.float().sum()
-
-    def compute(self):
-        eps = 1e-10  # small epsilon to prevent division by zero
-        iou = self.intersection / (self.union + eps)
-        return iou.mean().item()  # Average IoU across classes
 
 class DecoderDenoisingModel(pl.LightningModule):
     def __init__(
@@ -38,6 +19,7 @@ class DecoderDenoisingModel(pl.LightningModule):
         arch: str = "unet",
         encoder: str = "resnet18",
         in_channels: int = 3,
+        num_class: int = 4,
         mode: str = "decoder",
         noise_type: str = "scaled",
         noise_std: float = 0.22,
@@ -71,6 +53,7 @@ class DecoderDenoisingModel(pl.LightningModule):
         self.noise_type = noise_type
         self.noise_std = noise_std
         self.channel_last = channel_last
+        self.num_class = num_class
 
         # Initialize loss function
         self.loss_fn = self.get_loss_fn(loss_type)
@@ -80,7 +63,7 @@ class DecoderDenoisingModel(pl.LightningModule):
             arch,
             encoder_name=encoder,
             in_channels=in_channels,
-            classes=in_channels,
+            classes=num_class,
             encoder_weights="imagenet" if mode == "decoder" else None,
         )
 
@@ -107,9 +90,12 @@ class DecoderDenoisingModel(pl.LightningModule):
             return F.mse_loss
         elif loss_type == "huber":
             return F.smooth_l1_loss
+        elif loss_type == "ce":
+            return F.cross_entropy
+            # return torch.nn.CrossEntropyLoss
         else:
             raise ValueError(
-                f"{loss_type} is not an available loss function. Should be one of ['l1', 'l2', 'huber']"
+                f"{loss_type} is not an available loss function. Should be one of ['l1', 'l2', 'huber', 'ce']"
             )
 
     @torch.no_grad()
@@ -185,15 +171,17 @@ class DecoderDenoisingModel(pl.LightningModule):
                 f"{self.optimizer} is not an available optimizer. Should be one of ['adam', 'adamw', 'sgd']"
             )
 
-        scheduler = CosineAnnealingLR(
-            optimizer, T_max=self.trainer.estimated_stepping_batches  # type:ignore
-        )
+        # scheduler = CosineAnnealingLR(
+        #     optimizer, T_max=self.trainer.estimated_stepping_batches  # type:ignore
+        # )
+        scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 3)
 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": "epoch",
+                "monitor": "train_loss"
             },
         }
 
@@ -217,41 +205,101 @@ class FineTuningModel(DecoderDenoisingModel):
             channel_last: Change to channel last memory format for possible training speed up
         """
         super().__init__(*args, **kwargs)
-        
-        self.acc_fn = {'train': JaccardIndex(), 'val': JaccardIndex()}
+        self.acc_fn = JaccardIndex(ignore_index=0, task="multiclass", num_classes=4, average="micro")
 
-    def step(self, x, y=None, mode="train"):
+    def forward(self, x):
+        return self.net(x)
+
+    def step(self, batch, mode="train"):
+        x, y = batch
+        y = y.squeeze(1).long()
 
         # Predict mask
-        pred_y = self.net(x)
+        outputs = self.net(x)
+        # softmax normalization
+        probs = torch.softmax(outputs, dim=1)
+        # take the highest probabilities
+        pred_y = torch.argmax(probs, dim=1)
 
-        # Calculate loss
-        loss = self.loss_fn(pred_y, y)
+        # Calculate loss        
+        loss = self.loss_fn(outputs, y)
         
-        if y is not None:
-            # update accuracy
-            self.acc_fn[mode](pred_y, y)
+        # update accuracy
+        self.acc_fn.update(pred_y, y)
 
         # Log
         self.log(f"{mode}_loss", loss, prog_bar=True)
 
         return loss
 
-    def training_step(self, x, y):
+    def training_step(self, batch):        
         self.log(
             "lr",
             self.trainer.optimizers[0].param_groups[0]["lr"],  # type:ignore
             prog_bar=True,
         )
-        return self.step(x, y, mode="train")
+        return self.step(batch, mode="train")
 
-    def validation_step(self, x, y):
-        return self.step(x, y, mode="val")
+    def validation_step(self, batch):
+        return self.step(batch, mode="val")
     
-    def trainin_epoch_end(self):
-        self.log('train_jaccard', self.acc_fn['train'].compute())
+    def on_trainin_epoch_end(self):
+        self.log('train_jaccard', self.acc_fn.compute(), prog_bar=True)
         
-    def validation_epoch_end(self):
-        self.log('val_jaccard', self.acc_fn['val'].compute())
+    def on_validation_epoch_end(self):
+        self.log('val_jaccard', self.acc_fn.compute(), prog_bar=True)
+        
+    def predict_step(self, batch):
+        image, path = batch
+        
+        # create contribution array
+        arrone = torch.ones((1,4,*image.shape[-2:]))
+        contribution = self.stitch_patches(self.sliding_window(arrone, 512, 256), arrone.size())
+                
+        # slice image into overlapping patches
+        patches = self.sliding_window(image, 512, 256)
+        
+        # iterate over patches to get predictions
+        for im, img in enumerate(patches):            
+            # make prediction
+            output = self(img[2].to(self.device))
+            # update 
+            patches[im][2] = output.to('cpu')
+        
+        # stitch back patches and scale contribution
+        outputs = self.stitch_patches(patches, arrone.size())/contribution        
+        
+        # softmax normalization
+        probs = torch.softmax(outputs, dim=1)
+        # take the highest probabilities
+        pred_y = torch.argmax(probs, dim=1)
+        
+        # save prediction
+        np.save(path[0], pred_y)
+        
+        return pred_y
+    
+    def sliding_window(self, image, window_size, stride):
+        patches = []
+        _, _, H, W = image.size()
+
+        # Iterate over rows
+        for i in range(0, H - window_size + 1, stride):
+            # Iterate over columns
+            for j in range(0, W - window_size + 1, stride):
+                # Extract patch
+                patch = image[:, :, i:i+window_size, j:j+window_size]
+                patches.append([i, j, patch])  # Store patch position for stitching later
+
+        return patches
+
+    def stitch_patches(self, patches, image_size):
+        stitched_image = torch.zeros(*image_size)
+
+        for i, j, patch in patches:
+            _, _, h, w = patch.size()
+            stitched_image[:, :, i:i+h, j:j+w] += patch
+
+        return stitched_image
 
 
