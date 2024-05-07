@@ -112,6 +112,16 @@ class SupervisedDataModule(SSLDataModule):
     def __init__(
         self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.transforms = Compose(
+            [
+                # Resize(size),
+                # RandomCrop(crop), #I have enought data not to use crop
+                # RandomHorizontalFlip(),
+                ToTensor(),
+                Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                # Lambda(lambda t: (t * 2) - 1),  # Scale to [-1, 1]
+            ]
+        )
 
     def setup(self, stage="fit"):
         if stage == "fit":
