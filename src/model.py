@@ -265,6 +265,12 @@ class FineTuningModel(DecoderDenoisingModel):
             output = self(img[2].to(self.device))
             # update 
             patches[im][2] = output.to('cpu')
+            
+            # # check the prediction
+            # probs = torch.softmax(output, dim=1)
+            # # take the highest probabilities
+            # pred_y = torch.argmax(probs, dim=1)
+            # print(torch.unique(pred_y))
         
         # stitch back patches and scale contribution
         outputs = self.stitch_patches(patches, arrone.size())/contribution        
@@ -273,9 +279,10 @@ class FineTuningModel(DecoderDenoisingModel):
         probs = torch.softmax(outputs, dim=1)
         # take the highest probabilities
         pred_y = torch.argmax(probs, dim=1)
+        # print(torch.unique(pred_y))
         
         # save prediction
-        np.save(path[0], pred_y)
+        np.save(path[0], pred_y.numpy())
         
         return pred_y
     

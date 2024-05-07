@@ -198,7 +198,6 @@ class SupervisedDataset(data.Dataset):
             mask_array = np.zeros(img.shape[-2:])
 
         # Convert NumPy array to PIL Image
-        print(mask_array.shape)
         mask = Image.fromarray(mask_array.astype(np.uint8), mode="L")
         mask = self.transforms2(mask)*255
         return img, mask
@@ -215,12 +214,18 @@ class PredictionDataset(SupervisedDataset):
             transforms: Image augmentations
         """
         super().__init__(root, transforms)
+        # make directory for predictions
+        os.makedirs(os.path.join(self.root, 'label'), exist_ok=True)
 
     def __getitem__(self, index):
         img_path = self.images[index]
         img = Image.open(img_path).convert("RGB")
         img = self.transforms(img)
         
-        save_path = img_path.replace(self.root, os.path.join(self.root, 'test')).replace(".jpg", "_pred.npy").replace(".JPG", "_pred.npy")
+
+        save_path = img_path.replace(os.path.join(self.root, 'image'), 
+                                     os.path.join(self.root, 'label')).replace(".jpg", 
+                                                                               "_pred.npy").replace(".JPG", 
+                                                                                                    "_pred.npy")
         
         return img, save_path
