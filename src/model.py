@@ -291,9 +291,15 @@ class FineTuningModel(DecoderDenoisingModel):
         _, _, H, W = image.size()
 
         # Iterate over rows
-        for i in range(0, H - window_size + 1, stride):
+        for i in range(0, H - stride, stride):
+            # Ensure that the last window covers the remaining part of the image
+            if i + window_size > H:
+                i = H - window_size
             # Iterate over columns
-            for j in range(0, W - window_size + 1, stride):
+            for j in range(0, W - stride, stride):
+                # Ensure that the last window covers the remaining part of the image
+                if j + window_size > W:
+                    j = W - window_size
                 # Extract patch
                 patch = image[:, :, i:i+window_size, j:j+window_size]
                 patches.append([i, j, patch])  # Store patch position for stitching later
@@ -308,5 +314,3 @@ class FineTuningModel(DecoderDenoisingModel):
             stitched_image[:, :, i:i+h, j:j+w] += patch
 
         return stitched_image
-
-
