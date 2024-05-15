@@ -25,6 +25,7 @@ class DecoderDenoisingModel(pl.LightningModule):
         noise_std: float = 0.22,
         loss_type: str = "l2",
         channel_last: bool = False,
+        net = None
     ):
         """Decoder Denoising Pretraining Model
 
@@ -59,23 +60,26 @@ class DecoderDenoisingModel(pl.LightningModule):
         self.loss_fn = self.get_loss_fn(loss_type)
 
         # Initalize network
-        self.net = smp.create_model(
-            arch,
-            encoder_name=encoder,
-            in_channels=in_channels,
-            classes=num_class,
-            encoder_weights="imagenet" if mode == "decoder" else None,
-        )
+        if net is None:
+            self.net = smp.create_model(
+                arch,
+                encoder_name=encoder,
+                in_channels=in_channels,
+                classes=num_class,
+                encoder_weights="imagenet" if mode == "decoder" else None,
+            )           
 
-        # Freeze encoder when doing decoder only pretraining
-        if mode == "decoder":
-            for child in self.net.encoder.children():  # type:ignore
-                for param in child.parameters():
-                    param.requires_grad = False
-        elif mode != "encoder+decoder":
-            raise ValueError(
-                f"{mode} is not an available training mode. Should be one of ['decoder', 'encoder+decoder']"
-            )
+            # Freeze encoder when doing decoder only pretraining
+            if mode == "decoder":
+                for child in self.net.encoder.children():  # type:ignore
+                    for param in child.parameters():
+                        param.requires_grad = False
+            elif mode != "encoder+decoder":
+                raise ValueError(
+                    f"{mode} is not an available training mode. Should be one of ['decoder', 'encoder+decoder']"
+                )
+        else:
+            self.net = net
 
         # Change to channel last memory format
         # https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html
@@ -174,7 +178,7 @@ class DecoderDenoisingModel(pl.LightningModule):
         # scheduler = CosineAnnealingLR(
         #     optimizer, T_max=self.trainer.estimated_stepping_batches  # type:ignore
         # )
-        scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 3)
+        scheduler = ReduceLROnPlateau(optimizer, "min", 0.5, 3)
 
         return {
             "optimizer": optimizer,
@@ -282,7 +286,7 @@ class FineTuningModel(DecoderDenoisingModel):
         # print(torch.unique(pred_y))
         
         # save prediction
-        np.save(path[0], pred_y.numpy())
+        np.save(path[0], pred_y.numpy().squeeze(0))
         
         return pred_y
     
@@ -314,3 +318,59 @@ class FineTuningModel(DecoderDenoisingModel):
             stitched_image[:, :, i:i+h, j:j+w] += patch
 
         return stitched_image
+    
+class SplitMaskModel(FineTuningModel):
+    def __init__(self, *args, **kwargs):
+        """Fine Tuning Model
+
+        Args:
+            lr: Learning rate
+            optimizer: Name of optimizer (adam | adamw | sgd)
+            betas: Adam beta parameters
+            weight_decay: Optimizer weight decay
+            momentum: SGD momentum parameter
+            arch: Segmentation model architecture
+            encoder: Segmentation model encoder architecture
+            in_channels: Number of channels of input image
+            mode: Denoising pretraining mode (encoder | encoder+decoder)
+            noise_type: Type of noising process (scaled | simple)
+            noise_std: Standard deviation/magnitude of gaussian noise
+            loss_type: Loss function type (l1 | l2 | huber)
+            channel_last: Change to channel last memory format for possible training speed up
+        """
+        super().__init__(*args, **kwargs)
+
+
+    def step(self, batch, mode="train"):
+        x1, y1, x2, y2, m = batch
+
+        # Predict images
+        outputs1 = self.net(x1)
+        outputs2 = self.net(x2)
+
+
+        # Calculate loss        
+        loss = self.loss_fn(outputs1*m, y1*m) + self.loss_fn(outputs2*(~m), y2*(~m))
+        
+
+        # Log
+        self.log(f"{mode}_loss", loss, prog_bar=True)
+
+        return loss
+
+    def training_step(self, batch):        
+        self.log(
+            "lr",
+            self.trainer.optimizers[0].param_groups[0]["lr"],  # type:ignore
+            prog_bar=True,
+        )
+        return self.step(batch, mode="train")
+
+    def validation_step(self, batch):
+        return self.step(batch, mode="val")
+    
+    def on_trainin_epoch_end(self):
+        pass
+        
+    def on_validation_epoch_end(self):
+        pass       
